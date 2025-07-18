@@ -1,0 +1,172 @@
+---
+title: "Employee Attrition Prediction with Random Forest"
+author: "Leah Glassow"
+date: "2025-07-18"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Load Libraries
+```{r}
+library(dplyr)
+library(modeldata)
+library(randomForest)
+library(janitor)
+library(smotefamily)
+library(caret)
+library(pROC)
+library(PRROC)
+library(ggplot2)
+library(viridis)
+library(DALEX)
+library(ingredients)
+```
+
+# 2. Load and Prepare Data
+```{r}
+data(attrition)
+attdf <- as.data.frame(attrition)
+set.seed(123)
+attdf$year <- sample(1989:2010, size = nrow(attdf), replace = TRUE)
+attdf <- clean_names(attdf)
+attdf$attrition <- factor(attdf$attrition, levels = c("No", "Yes"))
+```
+
+# 3. Train-Test Split and Encoding
+```{r}
+set.seed(42)
+train_idx <- sample(1:nrow(attdf), 0.7 * nrow(attdf))
+train <- attdf[train_idx, ]
+test <- attdf[-train_idx, ]
+
+factor_vars <- names(attdf)[sapply(attdf, is.factor)]
+for (var in factor_vars) {
+  levels_combined <- levels(factor(attdf[[var]]))
+  train[[var]] <- factor(train[[var]], levels = levels_combined)
+  test[[var]] <- factor(test[[var]], levels = levels_combined)
+}
+```
+
+# 4. Apply SMOTE
+```{r}
+train_copy <- train
+for (col in names(train_copy)) {
+  if (is.factor(train_copy[[col]]) || is.character(train_copy[[col]])) {
+    train_copy[[col]] <- as.numeric(factor(train_copy[[col]]))
+  }
+}
+
+X <- train_copy[, c("monthly_income", "years_at_company", "stock_option_level")]
+y <- as.numeric(train$attrition) - 1
+
+smote_result <- SMOTE(X, y, K = 5, dup_size = 1)
+smote_data <- smote_result$data
+smote_data$attrition <- factor(smote_data$class, labels = c("No", "Yes"))
+smote_data$class <- NULL
+```
+
+# 5. Fit Random Forest Model
+```{r}
+rf_smote <- randomForest(
+  attrition ~ monthly_income + years_at_company + stock_option_level,
+  data = smote_data,
+  ntree = 200,
+  nodesize = 10,
+  maxnodes = 15,
+  importance = TRUE
+)
+```
+
+# 6. Evaluate Model
+```{r}
+test_copy <- test
+for (col in names(test_copy)) {
+  if (is.factor(test_copy[[col]]) || is.character(test_copy[[col]])) {
+    test_copy[[col]] <- as.numeric(factor(test_copy[[col]], levels = levels(factor(train[[col]]))))
+  }
+}
+
+pred_smote <- predict(rf_smote, newdata = test_copy)
+confusionMatrix(pred_smote, test$attrition, positive = "Yes")
+```
+
+# 7. ROC and PR Curves
+```{r}
+probs <- predict(rf_smote, newdata = test_copy, type = "prob")[, "Yes"]
+roc_obj <- roc(test$attrition, probs)
+plot(roc_obj, main = "ROC Curve", col = "blue", lwd = 2)
+auc(roc_obj)
+
+labels <- ifelse(test$attrition == "Yes", 1, 0)
+pr <- pr.curve(scores.class0 = probs[labels == 1],
+               scores.class1 = probs[labels == 0], curve = TRUE)
+plot(pr, main = "Precision-Recall Curve", col = "darkorange", lwd = 2)
+```
+
+# 8. Threshold Tuning
+```{r}
+thresholds <- seq(0.1, 0.4, by = 0.05)
+results <- data.frame(Threshold = thresholds, Sensitivity = NA, Precision = NA, F1 = NA)
+
+for (i in seq_along(thresholds)) {
+  pred <- factor(ifelse(probs > thresholds[i], "Yes", "No"), levels = c("No", "Yes"))
+  cm <- confusionMatrix(pred, test$attrition, positive = "Yes")
+  results$Sensitivity[i] <- cm$byClass["Sensitivity"]
+  results$Precision[i] <- cm$byClass["Precision"]
+  results$F1[i] <- cm$byClass["F1"]
+}
+
+plot(results$Threshold, results$F1, type = "o", col = "purple", ylim = c(0, 1),
+     ylab = "Score", xlab = "Threshold", main = "Threshold Tuning")
+lines(results$Threshold, results$Sensitivity, type = "o", col = "red")
+lines(results$Threshold, results$Precision, type = "o", col = "blue")
+legend("bottomleft", legend = c("F1", "Sensitivity", "Precision"),
+       col = c("purple", "red", "blue"), lty = 1, bty = "n")
+```
+
+# 9. SHAP Explanations
+```{r}
+explainer_rf <- explain(
+  rf_smote,
+  data = smote_data[, c("monthly_income", "years_at_company", "stock_option_level")],
+  y = as.numeric(smote_data$attrition == "Yes"),
+  label = "RF"
+)
+
+test_shap <- test[1, c("monthly_income", "years_at_company", "stock_option_level")]
+for (col in names(test_shap)) {
+  test_shap[[col]] <- as.numeric(factor(test_shap[[col]], levels = levels(factor(train[[col]]))))
+}
+
+shap_values <- predict_parts(explainer_rf, new_observation = test_shap, type = "shap")
+plot(shap_values)
+```
+
+# 10. Contour Risk Plot
+```{r}
+smote_data_reduced <- smote_data[, c("monthly_income", "years_at_company", "attrition")]
+rf_2vars <- randomForest(
+  attrition ~ monthly_income + years_at_company,
+  data = smote_data_reduced,
+  ntree = 500
+)
+
+x_seq <- seq(min(smote_data_reduced$monthly_income), max(smote_data_reduced$monthly_income), length.out = 100)
+y_seq <- seq(min(smote_data_reduced$years_at_company), max(smote_data_reduced$years_at_company), length.out = 60)
+grid <- expand.grid(monthly_income = x_seq, years_at_company = y_seq)
+grid$predicted_risk <- predict(rf_2vars, newdata = grid, type = "prob")[, "Yes"]
+
+ggplot(grid, aes(x = monthly_income, y = years_at_company)) +
+  geom_tile(aes(fill = predicted_risk)) +
+  stat_contour(aes(z = predicted_risk), color = "white", bins = 10) +
+  scale_fill_viridis(name = "Predicted Risk", labels = scales::percent_format()) +
+  labs(title = "Attrition Risk Contour", x = "Monthly Income", y = "Years at Company") +
+  theme_minimal()
+```
