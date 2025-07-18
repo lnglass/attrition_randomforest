@@ -28,9 +28,9 @@ This project builds a classification model to predict employee attrition using t
 
 ## Files
 
-- `attrition_rf.Rmd`: Reproducible analysis in R Markdown
-- `shiny_app.R`: Optional Shiny app to explore threshold tuning interactively
-- `thresholds.png`, `roc_curve.png`, `shap.png`: Visual outputs
+- `employee_attrition_model_LeahGlassow.Rmd`: Reproducible analysis in R Markdown
+- `attrition_randomforest_isobar.R`: End-to-end R script
+- Visual output files 
 - `LICENSE`: MIT License
 - `README.md`: This file
 
