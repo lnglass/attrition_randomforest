@@ -33,6 +33,7 @@ This project builds a classification model to predict employee attrition using t
 - Visual output files 
 - `LICENSE`: MIT License
 - `README.md`: This file
+- `shiny.app.R`: Shiny dashboard 
 
 ---
 
